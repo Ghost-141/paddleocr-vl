@@ -1,54 +1,37 @@
 # PaddleOCR-VL API
 
-Authenticated FastAPI service for PaddleOCR-VL. The deployment runs two GPU
-containers:
+<p align="left">
+  <a href="https://github.com/PaddlePaddle/PaddleOCR">
+    <img alt="PaddleOCR-VL" src="https://img.shields.io/badge/PaddleOCR--VL-1.6-0052CC?style=flat-square" />
+  </a>
+  <a href="https://docs.vllm.ai/">
+    <img alt="vLLM" src="https://img.shields.io/badge/vLLM-Inference_Backend-4B32C3?style=flat-square" />
+  </a>
+  <a href="https://fastapi.tiangolo.com/">
+    <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-API-009688?style=flat-square&amp;logo=fastapi&amp;logoColor=white" />
+  </a>
+  <a href="https://www.docker.com/">
+    <img alt="Docker Compose" src="https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&amp;logo=docker&amp;logoColor=white" />
+  </a>
+  <a href="https://developer.nvidia.com/cuda-toolkit">
+    <img alt="NVIDIA CUDA 13.x" src="https://img.shields.io/badge/NVIDIA-CUDA_13.x-76B900?style=flat-square&amp;logo=nvidia&amp;logoColor=white" />
+  </a>
+  <a href="https://www.python.org/">
+    <img alt="Python 3.10 to 3.13" src="https://img.shields.io/badge/Python-3.10--3.13-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" />
+  </a>
+</p>
 
-- `paddleocr-vlm-server`: official PaddleOCR vLLM inference service.
-- `api`: layout analysis, uploads, result assembly, and HTTP endpoints.
+![Architecture](docs/system.png)
 
-Both containers share one NVIDIA GPU. The supplied vLLM configuration uses 70%
-of VRAM, leaving capacity for the layout model on a 24 GB card.
+This repository turns PaddleOCR-VL into a self-hosted, GPU-accelerated document-processing API. It processes images and multi-page PDFs through authenticated FastAPI endpoints and returns structured JSON, clean Markdown, or both while preserving headings, paragraphs, lists, formulas, and tables.
 
-## Project Structure
+Designed for private OCR, RAG ingestion, search indexing, and knowledge-base creation, the system includes validation, configurable limits, automated model setup, authentication, health checks, file cleanup, and lightweight tests.
 
-```text
-paddlocr_vl/
-├── api/
-│   ├── router.py
-│   └── routes/
-│       ├── documents.py
-│       └── health.py
-├── core/
-│   ├── config.py
-│   ├── dependencies.py
-│   └── logger.py
-├── service/
-│   └── paddleocr_vl.py
-├── utils/
-│   └── file_utils.py
-├── main.py
-└── schemas.py
-```
+Docker Compose manages two services: a PaddleOCR vLLM inference server and a FastAPI processing layer. Both can share a single GPU, or layout analysis can run on CPU while vLLM uses the GPU, allowing flexible resource allocation.
 
-`PaddleOCRVLService` in `paddlocr_vl/service/paddleocr_vl.py` owns the current
-provider integration. It initializes PaddleOCR-VL, calls the vLLM backend,
-serializes GPU inference, saves page results, and assembles multi-page output.
-The API routers obtain it through `core/dependencies.py` instead of importing
-PaddleOCR directly.
+See the [API reference](docs/API.md) for authentication, exact parameters,
+response formats, examples, limits, and error codes.
 
-The `service` package is the extension point for additional VL OCR providers.
-A future provider can be added as another module, for example:
-
-```text
-paddlocr_vl/service/
-├── paddleocr_vl.py
-├── olmocr.py
-└── granite_docling.py
-```
-
-Provider selection is not dynamic yet. Adding another provider also requires
-registering it during application startup and exposing it through the dependency
-layer.
 
 ## Requirements
 
@@ -59,16 +42,6 @@ layer.
 - NVIDIA Container Toolkit
 - Internet access for the first image and model download
 
-The application lockfile installs `paddlepaddle-gpu==3.3.0` from
-PaddlePaddle's official CUDA 13.0 index. The official PaddleOCR containers may
-carry their own tested CUDA runtime; containers use the host NVIDIA driver, not
-the host CUDA toolkit installation.
-
-Official references:
-
-- [PaddleOCR-VL usage and deployment](https://www.paddleocr.ai/latest/en/version3.x/pipeline_usage/PaddleOCR-VL.html)
-- [PaddlePaddle installation](https://www.paddlepaddle.org.cn/documentation/docs/en/install/index_en.html)
-- [NVIDIA Container Toolkit installation](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
 
 ## Verify The Host
 
@@ -101,6 +74,17 @@ Generate a public API key and place it in `.env`:
 openssl rand -hex 32
 ```
 
+At minimum, review these runtime values in `.env`:
+
+```dotenv
+PUBLIC_API_KEY=replace-with-a-generated-secret
+APP_PORT=8080
+GPU_DEVICE_ID=0
+DEVICE=gpu:0
+MAX_FILE_SIZE_MB=100
+MAX_PAGES=100
+```
+
 Important settings:
 
 | Variable | Default | Purpose |
@@ -108,18 +92,32 @@ Important settings:
 | `PUBLIC_API_KEY` | Required | Bearer token accepted by parsing endpoints |
 | `APP_PORT` | `8080` | Port exposed on the host |
 | `GPU_DEVICE_ID` | `0` | NVIDIA GPU assigned to both containers |
-| `VL_REC_MAX_CONCURRENCY` | `1` | Concurrent vLLM recognition requests |
-| `MAX_FILE_SIZE_MB` | `100` | Maximum uploaded file size |
-| `MAX_PAGES` | `100` | Maximum PDF pages processed |
-| `DELETE_TEMP_FILES` | `true` | Delete request files after responding |
-| `API_BASE_IMAGE` | Official online image | PaddleOCR API base image |
-| `VLLM_IMAGE` | Official online image | PaddleOCR vLLM image |
+| `DEVICE` | `gpu:0` | PaddleOCR pipeline device (`gpu:0` or `cpu`) |
+| `MAX_FILE_SIZE_MB` | `100` | Maximum accepted upload size in MiB |
+| `MAX_PAGES` | `100` | Maximum number of PDF page results returned per request |
+| `API_BASE_IMAGE` | Official offline image | PaddleOCR API base image with bundled models |
+| `VLLM_IMAGE` | Official offline image | PaddleOCR vLLM image with bundled model |
+| `HF_TOKEN` | Empty | Optional Hugging Face token for faster model downloads |
 
-Do not commit `.env`; it is excluded by `.gitignore` and `.dockerignore`.
+### Note 
+`GPU_DEVICE_ID` selects
+the physical NVIDIA GPU exposed to the containers. `DEVICE` tells the API
+where to run the PaddleOCR pipeline and accepts values such as `gpu:0` or
+`cpu`. 
 
-For a 24 GB GPU, retain the default settings initially. If CUDA reports an
-out-of-memory error, reduce `gpu-memory-utilization` in
-`deploy/vllm_config.yaml`, for example from `0.7` to `0.6`.
+`MAX_FILE_SIZE_MB` is checked while an upload is written and requests over the
+limit receive HTTP 413. `MAX_PAGES` limits the number of page results included
+in the API response and assembled Markdown. 
+
+Set `DEVICE=cpu` to run the PaddleOCR pipeline, including layout detection, on
+CPU while keeping the vLLM service on the selected NVIDIA GPU. 
+
+After changing `DEVICE`, `MAX_FILE_SIZE_MB`, or `MAX_PAGES`, apply the new
+environment values without rebuilding the image:
+
+```bash
+docker compose up -d --force-recreate api
+```
 
 ## Deploy
 
@@ -131,7 +129,29 @@ docker compose build
 docker compose up -d
 ```
 
-The first start is slow because images and model weights must be downloaded.
+Step by step:
+
+1. Copy `.env.example` to `.env`, fill in `PUBLIC_API_KEY`, and review
+   `DEVICE`, `MAX_FILE_SIZE_MB`, and `MAX_PAGES`.
+2. Verify the host GPU with `nvidia-smi`.
+3. Pull the official images with `docker compose pull`.
+4. Build the API image with `docker compose build`.
+5. Start the stack with `docker compose up -d`.
+6. Check `docker compose ps` and `docker compose logs -f` until both services are healthy.
+7. Test `http://localhost:${APP_PORT}/health`.
+
+The `model-setup` service downloads the pinned `PP-DocLayoutV2` model to `./models/PP-DocLayoutV2` before the API starts. The API mounts it read-only, so keep the `models` directory between rebuilds. Downloads support retries and resume; set `HF_TOKEN` in `.env` for authenticated Hugging Face access.
+
+
+Verify the packaged model before starting the API:
+
+```bash
+du -sh models/PP-DocLayoutV2
+test -f models/PP-DocLayoutV2/inference.pdiparams
+```
+
+Model weights are bundled in those images, so startup does not depend on a
+separate Paddle model-host download.
 Watch initialization:
 
 ```bash
@@ -156,6 +176,36 @@ Interactive API documentation is available at:
 http://localhost:8080/docs
 ```
 
+## Debugging
+
+Use these commands when startup stalls or a request fails:
+
+```bash
+nvidia-smi
+docker compose ps
+docker compose logs -f paddleocr-vlm-server
+docker compose logs -f api
+curl --fail-with-body http://localhost:8080/health
+docker compose exec api curl -fsS http://paddleocr-vlm-server:8118/health
+```
+
+Inspect the container health check directly:
+
+```bash
+docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' \
+  "$(docker compose ps -q paddleocr-vlm-server)"
+docker inspect --format '{{range .State.Health.Log}}exit={{.ExitCode}} {{.Output}}{{println}}{{end}}' \
+  "$(docker compose ps -q paddleocr-vlm-server)"
+```
+
+Remove stale containers from older Compose runs:
+
+```bash
+docker compose down --remove-orphans
+docker ps -a | grep paddleocr
+docker rm -f <container_name_or_id>
+```
+
 ## Connect
 
 Set the connection details in the client shell. Replace the host with the
@@ -175,59 +225,6 @@ Authorization: Bearer <PUBLIC_API_KEY>
 For remote access, allow `APP_PORT` through the host firewall or place the API
 behind an HTTPS reverse proxy. Do not expose an unencrypted public HTTP endpoint
 because the bearer token and uploaded documents would travel in plaintext.
-
-## Image API
-
-`POST /parse/image` accepts one PNG, JPEG, WebP, or TIFF image per request and
-returns both the structured JSON and Markdown results.
-
-```bash
-curl --fail-with-body \
-  -X POST "$OCR_API_URL/parse/image" \
-  -H "Authorization: Bearer $OCR_API_KEY" \
-  -F "file=@page.png"
-```
-
-Multiple images must currently be sent as separate requests.
-
-## PDF API
-
-`POST /parse/pdf` accepts a multi-page PDF. Processing stops at `MAX_PAGES`.
-Use the optional `output_format` query parameter:
-
-| Value | Returned result |
-| --- | --- |
-| `json` | Page-level structured JSON only |
-| `markdown` | Final combined Markdown only |
-| `both` | Page JSON, page Markdown, and final combined Markdown |
-| Omitted | Same as `both` |
-
-Return both formats:
-
-```bash
-curl --fail-with-body \
-  -X POST "$OCR_API_URL/parse/pdf" \
-  -H "Authorization: Bearer $OCR_API_KEY" \
-  -F "file=@document.pdf"
-```
-
-Return only final Markdown:
-
-```bash
-curl --fail-with-body \
-  -X POST "$OCR_API_URL/parse/pdf?output_format=markdown" \
-  -H "Authorization: Bearer $OCR_API_KEY" \
-  -F "file=@document.pdf"
-```
-
-Return only page JSON:
-
-```bash
-curl --fail-with-body \
-  -X POST "$OCR_API_URL/parse/pdf?output_format=json" \
-  -H "Authorization: Bearer $OCR_API_KEY" \
-  -F "file=@document.pdf"
-```
 
 ## Operate
 
@@ -252,20 +249,11 @@ Install the locked Python environment:
 uv sync
 ```
 
-The local API still requires a reachable vLLM backend. Start the Compose vLLM
-service and publish its internal port if doing host-based API development, or
-run the complete Compose stack for the supported path.
+The local API expects the same internal Compose defaults as production. If you
+want host-based development, change `paddlocr_vl/core/config.py` first so the
+API points at a reachable vLLM server.
 
-The ASGI application import path is:
-
-```bash
-PUBLIC_API_KEY=development-key \
-VLLM_SERVER_URL=http://localhost:8118/v1 \
-uv run uvicorn paddlocr_vl.main:app --host 0.0.0.0 --port 8080
-```
-
-This command requires a vLLM service reachable at port `8118`. Run tests without
-model initialization:
+Run tests without model initialization:
 
 ```bash
 uv run pytest -q
@@ -285,14 +273,16 @@ runtime configuration.
 
 **vLLM remains unhealthy during first startup**
 
-Model download and initialization can take several minutes. Check
+The offline vLLM image still needs time to initialize the model on GPU. Check
 `docker compose logs -f paddleocr-vlm-server`. The health check allows a
-10-minute startup period.
+10-minute startup period. If the API reports a missing layout model directory,
+run `docker compose logs -f model-setup` and confirm the model download
+completed successfully before starting it.
 
 **CUDA out of memory**
 
 Stop other GPU processes, verify the selected `GPU_DEVICE_ID`, and lower
-`gpu-memory-utilization` in `deploy/vllm_config.yaml`.
+`gpu-memory-utilization` or `max-num-seqs` in `deploy/vllm_config.yaml`.
 
 **HTTP 401**
 
@@ -302,7 +292,7 @@ the API container with `docker compose up -d --force-recreate api`.
 **HTTP 413**
 
 The upload exceeds `MAX_FILE_SIZE_MB`. Increase the setting deliberately and
-recreate the API container.
+recreate the API container with `docker compose up -d --force-recreate api`.
 
 **HTTP 415**
 
