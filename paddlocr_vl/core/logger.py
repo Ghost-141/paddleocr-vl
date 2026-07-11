@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
-import os
+
+DEFAULT_LOG_LEVEL = "INFO"
 
 
 def configure_logging() -> None:
     logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        level=DEFAULT_LOG_LEVEL,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 

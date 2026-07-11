@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from fastapi import HTTPException, UploadFile
@@ -12,6 +13,20 @@ ALLOWED_CONTENT_TYPES = {
 }
 ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
 IMAGE_EXTENSIONS = ALLOWED_EXTENSIONS - {".pdf"}
+HTML_IMAGE = re.compile(
+    r"<div\b[^>]*>\s*<img\b[^>]*>\s*</div>|<img\b[^>]*>",
+    flags=re.IGNORECASE,
+)
+MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+DATA_IMAGE_URI = re.compile(
+    r"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+",
+    flags=re.IGNORECASE,
+)
+DATA_IMAGE_TAG = re.compile(
+    r"<div\b[^>]*>\s*<img\b[^>]*\bsrc\s*=\s*(?:\"|\\\")?data:image/[A-Za-z0-9.+-]+;base64,[^>]*?>\s*</div>"
+    r"|<img\b[^>]*\bsrc\s*=\s*(?:\"|\\\")?data:image/[A-Za-z0-9.+-]+;base64,[^>]*?>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 
 
 def validate_upload(file: UploadFile) -> str:
@@ -52,8 +67,13 @@ def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
-def read_markdown(path: Path) -> str:
-    return path.read_text(encoding="utf-8") if path.exists() else ""
+def strip_markdown_images(markdown: str) -> str:
+    """Remove generated image markup while retaining textual content."""
+    markdown = DATA_IMAGE_TAG.sub("", markdown)
+    markdown = DATA_IMAGE_URI.sub("", markdown)
+    markdown = HTML_IMAGE.sub("", markdown)
+    markdown = MARKDOWN_IMAGE.sub("", markdown)
+    return re.sub(r"\n{3,}", "\n\n", markdown).strip()
 
 
 def json_compatible(value: Any) -> Any:
