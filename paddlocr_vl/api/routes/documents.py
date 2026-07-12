@@ -5,6 +5,7 @@ from typing import Annotated
 import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from ...core.config import Settings
@@ -34,7 +35,9 @@ async def _parse_document(
     try:
         size = await save_upload(file, upload_path, settings.max_file_size_bytes)
         try:
-            result = ocr_service.predict(upload_path, output_dir)
+            result = await run_in_threadpool(
+                ocr_service.predict, upload_path, output_dir
+            )
         except Exception as exc:
             raise HTTPException(502, f"Document parsing failed: {exc}") from exc
         response: dict[str, object] = {

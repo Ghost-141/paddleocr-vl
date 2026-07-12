@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import threading
 from typing import Any
@@ -7,14 +8,15 @@ from typing import Any
 from paddleocr import PaddleOCRVL
 
 from ..core.config import Settings
-from ..utils.file_utils import read_json
-from ..utils.markdown_assembler import assemble_document_markdown, assemble_page_markdown
+from ..utils.markdown_assembler import assemble_page_markdown
 
 
 class PaddleOCRVLService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self._lock = threading.Lock()
+        self._inflight = threading.BoundedSemaphore(
+            max(1, self.settings.vl_rec_max_concurrency)
+        )
         self._pipeline: PaddleOCRVL | None = None
 
     @property
@@ -55,47 +57,69 @@ class PaddleOCRVLService:
         if self._pipeline is None:
             raise RuntimeError("PaddleOCR-VL pipeline is not initialized")
         output_dir.mkdir(parents=True, exist_ok=True)
-        pages: list[dict[str, Any]] = []
-        document_pages: list[dict[str, Any]] = []
-        with self._lock:
-            results = list(self._pipeline.predict(str(input_path)))
-            results = results[: self.settings.max_pages]
-            if (
-                input_path.suffix.lower() == ".pdf"
-                and len(results) > 1
-                and self.settings.restructure_pages
-            ):
-                restructure_pages = getattr(
-                    self._pipeline, "restructure_pages", None
-                )
-                if not callable(restructure_pages):
-                    raise RuntimeError(
-                        "The installed PaddleOCR version does not support "
-                        "multi-page restructuring"
-                    )
-                results = list(
-                    restructure_pages(
-                        results,
-                        merge_tables=self.settings.merge_cross_page_tables,
-                        relevel_titles=self.settings.relevel_titles,
-                        concatenate_pages=self.settings.concatenate_pages,
-                    )
-                )
 
-            for index, result in enumerate(results, start=1):
-                json_path = output_dir / f"page_{index}.json"
-                result.save_to_json(save_path=str(json_path))
-                page_json = read_json(json_path)
-                if not isinstance(page_json, dict):
-                    raise RuntimeError("PaddleOCR-VL did not produce a valid JSON page result")
-                page_markdown = assemble_page_markdown(page_json)
-                markdown_path = output_dir / f"page_{index}.md"
-                markdown_path.write_text(page_markdown + "\n", encoding="utf-8")
-                page_entry = {"page": index, "json": page_json, "markdown": page_markdown}
-                pages.append(page_entry)
-                document_pages.append(page_json)
+        with self._inflight:
+            results = list(self._pipeline.predict(str(input_path)))
+        # Semaphore released — GPU slot is free for the next request.
+        # Everything below is CPU + disk I/O.
+
+        results = results[: self.settings.max_pages]
+        if (
+            input_path.suffix.lower() == ".pdf"
+            and len(results) > 1
+            and self.settings.restructure_pages
+        ):
+            restructure_pages = getattr(
+                self._pipeline, "restructure_pages", None
+            )
+            if not callable(restructure_pages):
+                raise RuntimeError(
+                    "The installed PaddleOCR version does not support "
+                    "multi-page restructuring"
+                )
+            results = list(
+                restructure_pages(
+                    results,
+                    merge_tables=self.settings.merge_cross_page_tables,
+                    relevel_titles=self.settings.relevel_titles,
+                    concatenate_pages=self.settings.concatenate_pages,
+                )
+            )
+
+        page_markdowns: list[str] = [None] * len(results)  # type: ignore[list-item]
+        page_jsons: list[dict[str, Any]] = [None] * len(results)  # type: ignore[list-item]
+
+        def _process_page(index: int, result: Any) -> tuple[int, dict[str, Any], str]:
+            json_path = output_dir / f"page_{index}.json"
+            result.save_to_json(save_path=str(json_path))
+            page_json = dict(result)
+            page_markdown = assemble_page_markdown(page_json)
+            markdown_path = output_dir / f"page_{index}.md"
+            markdown_path.write_text(page_markdown + "\n", encoding="utf-8")
+            return index, page_json, page_markdown
+
+        max_workers = min(len(results), 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [
+                pool.submit(_process_page, idx, res)
+                for idx, res in enumerate(results, start=1)
+            ]
+            for future in as_completed(futures):
+                idx, page_json, page_markdown = future.result()
+                page_jsons[idx - 1] = page_json
+                page_markdowns[idx - 1] = page_markdown
+
+        pages = [
+            {"page": i + 1, "json": page_jsons[i], "markdown": page_markdowns[i]}
+            for i in range(len(results))
+        ]
+
+        combined = "\n\n".join(
+            md for md in page_markdowns if md and md.strip()
+        ).strip()
+
         return {
             "processed_pages": len(pages),
             "pages": pages,
-            "combined_markdown": assemble_document_markdown(document_pages),
+            "combined_markdown": combined,
         }
