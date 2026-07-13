@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 from pathlib import Path
 import threading
 from typing import Any
@@ -8,7 +9,6 @@ from typing import Any
 from paddleocr import PaddleOCRVL
 
 from ..core.config import Settings
-from ..utils.file_utils import read_json
 from ..utils.markdown_assembler import assemble_page_markdown
 
 
@@ -70,9 +70,7 @@ class PaddleOCRVLService:
             and len(results) > 1
             and self.settings.restructure_pages
         ):
-            restructure_pages = getattr(
-                self._pipeline, "restructure_pages", None
-            )
+            restructure_pages = getattr(self._pipeline, "restructure_pages", None)
             if not callable(restructure_pages):
                 raise RuntimeError(
                     "The installed PaddleOCR version does not support "
@@ -91,11 +89,13 @@ class PaddleOCRVLService:
         page_jsons: list[dict[str, Any]] = [None] * len(results)  # type: ignore[list-item]
 
         def _process_page(index: int, result: Any) -> tuple[int, dict[str, Any], str]:
-            json_path = output_dir / f"page_{index}.json"
-            result.save_to_json(save_path=str(json_path))
-            page_json = read_json(json_path)
+            page_json = result.json
+            if isinstance(page_json, str):
+                page_json = json.loads(page_json)
             if not isinstance(page_json, dict):
-                raise RuntimeError(f"Invalid PaddleOCR JSON result: {json_path}")
+                raise RuntimeError(
+                    "PaddleOCR returned an invalid in-memory JSON result"
+                )
             page_markdown = assemble_page_markdown(page_json)
             markdown_path = output_dir / f"page_{index}.md"
             markdown_path.write_text(page_markdown + "\n", encoding="utf-8")
@@ -117,8 +117,14 @@ class PaddleOCRVLService:
             for i in range(len(results))
         ]
 
+        non_empty_pages = [
+            (page, md)
+            for page, md in enumerate(page_markdowns, start=1)
+            if md and md.strip()
+        ]
         combined = "\n\n".join(
-            md for md in page_markdowns if md and md.strip()
+            md if position == 0 else f"---\n\n_Page {page}_\n\n{md}"
+            for position, (page, md) in enumerate(non_empty_pages)
         ).strip()
 
         return {
