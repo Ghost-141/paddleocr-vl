@@ -6,7 +6,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from ...core.config import Settings
 from ...core.dependencies import authorize, get_ocr_service, get_settings
@@ -28,7 +28,7 @@ async def _parse_document(
     ocr_service: PaddleOCRVLService,
     output_format: OutputFormat,
     extension: str,
-) -> JSONResponse:
+) -> Response:
     request_id = uuid.uuid4().hex
     upload_path = settings.upload_dir / f"{request_id}{extension}"
     output_dir = settings.output_dir / request_id
@@ -40,6 +40,16 @@ async def _parse_document(
             )
         except Exception as exc:
             raise HTTPException(502, f"Document parsing failed: {exc}") from exc
+        if output_format is OutputFormat.MARKDOWN:
+            return Response(
+                content=result["combined_markdown"],
+                media_type="text/markdown",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{request_id}.md"',
+                    "X-Request-ID": request_id,
+                    "X-Processed-Pages": str(result["processed_pages"]),
+                },
+            )
         response: dict[str, object] = {
             "request_id": request_id,
             "filename": file.filename,
@@ -51,10 +61,9 @@ async def _parse_document(
             response["pages"] = [
                 {"page": page["page"], "json": page["json"]} for page in result["pages"]
             ]
-        if output_format in {OutputFormat.MARKDOWN, OutputFormat.BOTH}:
+        if output_format is OutputFormat.BOTH:
             response["combined_markdown"] = result["combined_markdown"]
-            if output_format is OutputFormat.BOTH:
-                response["pages"] = result["pages"]
+            response["pages"] = result["pages"]
         return JSONResponse(json_compatible(response))
     finally:
         if settings.delete_temp_files:
@@ -71,7 +80,7 @@ async def parse_image(
     file: Annotated[UploadFile, File(...)],
     settings: Annotated[Settings, Depends(get_settings)],
     ocr_service: Annotated[PaddleOCRVLService, Depends(get_ocr_service)],
-) -> JSONResponse:
+) -> Response:
     extension = validate_image_upload(file)
     return await _parse_document(
         file, settings, ocr_service, OutputFormat.BOTH, extension
@@ -82,6 +91,13 @@ async def parse_image(
     "/parse/pdf",
     response_model=ParseResponse,
     response_model_exclude_none=True,
+    responses={
+        200: {
+            "content": {
+                "text/markdown": {"schema": {"type": "string"}},
+            }
+        }
+    },
 )
 async def parse_pdf(
     file: Annotated[UploadFile, File(...)],
@@ -91,7 +107,7 @@ async def parse_pdf(
         OutputFormat,
         Query(description="Result content to include"),
     ] = OutputFormat.BOTH,
-) -> JSONResponse:
+) -> Response:
     extension = validate_upload(file)
     if extension != ".pdf":
         raise HTTPException(415, "This endpoint accepts PDF files only")

@@ -20,6 +20,9 @@ DEFAULT_IGNORE_LABELS = {
 }
 HEADING_RE = re.compile(r"^\s*(#{1,6})\s*(.+?)\s*$")
 INLINE_SPACE_RE = re.compile(r"[ \t]+")
+DOCUMENT_TITLE_LABELS = {"doc_title", "document_title", "title"}
+SECTION_TITLE_LABELS = {"paragraph_title", "section_title"}
+SUBSECTION_TITLE_LABELS = {"subsection_title", "sub_title"}
 
 
 def assemble_document_markdown(pages: Sequence[Mapping[str, Any]]) -> str:
@@ -43,10 +46,8 @@ def assemble_page_markdown(page: Mapping[str, Any]) -> str:
         ignore_labels.update(str(label) for label in model_settings.get("markdown_ignore_labels", []))
 
     blocks = page.get("parsing_res_list") or []
-    ordered_blocks = sorted(
-        (block for block in blocks if isinstance(block, Mapping)),
-        key=_block_sort_key,
-    )
+    # Paddle documents parsing_res_list as already being in reading order.
+    ordered_blocks = [block for block in blocks if isinstance(block, Mapping)]
 
     rendered_blocks = [
         rendered
@@ -62,8 +63,12 @@ def render_block(block: Mapping[str, Any], ignore_labels: set[str]) -> str | Non
     if not content or label in ignore_labels:
         return None
 
-    if label == "paragraph_title":
+    if label in DOCUMENT_TITLE_LABELS:
+        return normalize_heading(content, default_level=1)
+    if label in SECTION_TITLE_LABELS:
         return normalize_heading(content, default_level=2)
+    if label in SUBSECTION_TITLE_LABELS:
+        return normalize_heading(content, default_level=3)
     if label == "display_formula":
         return normalize_display_formula(content)
     if label == "inline_formula":
@@ -145,14 +150,3 @@ def _looks_like_code_block(lines: Sequence[str]) -> bool:
             code_hints += 1
             continue
     return code_hints >= max(2, len(lines) // 2)
-
-
-def _block_sort_key(block: Mapping[str, Any]) -> tuple[int, int, int, int]:
-    bbox = block.get("block_bbox") or [0, 0, 0, 0]
-    top = int(bbox[1]) if len(bbox) > 1 else 0
-    left = int(bbox[0]) if bbox else 0
-    order = block.get("block_order")
-    sort_order = int(order) if isinstance(order, int) else 10**9
-    global_block_id = block.get("global_block_id")
-    tie_breaker = int(global_block_id) if isinstance(global_block_id, int) else 10**9
-    return (top, left, sort_order, tie_breaker)
