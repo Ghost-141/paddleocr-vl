@@ -22,7 +22,9 @@ class TritonClient:
             f"{settings.triton_url}/v2/models/{settings.triton_model}/infer"
         )
 
-    def infer(self, image_path: Path, *, timeout: int = 600) -> dict[str, Any]:
+    def infer(
+        self, image_path: Path, *, use_layout_detection: bool = True, timeout: int = 600
+    ) -> dict[str, Any]:
         pipeline_input = json.dumps(
             {
                 "file": base64.b64encode(image_path.read_bytes()).decode("ascii"),
@@ -30,6 +32,7 @@ class TritonClient:
                 "returnMarkdownImages": False,
                 "visualize": False,
                 "restructurePages": False,
+                "useLayoutDetection": use_layout_detection,
             },
             separators=(",", ":"),
         )

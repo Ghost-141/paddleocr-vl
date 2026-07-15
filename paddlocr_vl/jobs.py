@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 import shutil
 import sqlite3
 import time
@@ -79,6 +80,26 @@ class JobStore:
                     ON pages(status, available_at, page_number);
                 CREATE INDEX IF NOT EXISTS jobs_cleanup_idx
                     ON jobs(status, completed_at);
+                CREATE TABLE IF NOT EXISTS regions (
+                    job_id TEXT NOT NULL,
+                    page_number INTEGER NOT NULL,
+                    region_number INTEGER NOT NULL,
+                    label TEXT NOT NULL,
+                    bbox TEXT NOT NULL,
+                    crop_path TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    available_at REAL NOT NULL DEFAULT 0,
+                    lease_owner TEXT,
+                    lease_expires REAL,
+                    error TEXT,
+                    result_path TEXT,
+                    PRIMARY KEY (job_id, page_number, region_number),
+                    FOREIGN KEY (job_id, page_number)
+                        REFERENCES pages(job_id, page_number) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS regions_claim_idx
+                    ON regions(status, available_at, page_number, region_number);
                 """
             )
 
@@ -152,7 +173,12 @@ class JobStore:
                     (now, job_id),
                 )
                 db.execute(
-                    "UPDATE pages SET status='cancelled' WHERE job_id=? AND status='pending'",
+                    """UPDATE pages SET status='cancelled', lease_owner=NULL, lease_expires=NULL
+                       WHERE job_id=? AND status IN ('pending','recognizing')""",
+                    (job_id,),
+                )
+                db.execute(
+                    "UPDATE regions SET status='cancelled' WHERE job_id=? AND status='pending'",
                     (job_id,),
                 )
                 self._sync(db, job_id, now)
@@ -191,10 +217,10 @@ class JobStore:
                      AND j.status IN ('queued','running')
                      AND j.cancellation_requested=0
                      AND (SELECT count(*) FROM pages r
-                          WHERE r.job_id=p.job_id AND r.status='running') < 2
+                          WHERE r.job_id=p.job_id AND r.status='running') < ?
                    ORDER BY COALESCE(j.last_claimed_at, 0), j.created_at, p.page_number
                    LIMIT 1""",
-                (now,),
+                (now, self.settings.max_pages_per_job),
             ).fetchone()
             if not page:
                 return None
@@ -232,6 +258,173 @@ class JobStore:
             )
             self._sync(db, task["job_id"], now)
         return self.get(task["job_id"])  # type: ignore[return-value]
+
+    def enqueue_regions(self, task: dict[str, Any], regions: list[dict[str, Any]]) -> None:
+        """Release a rendered page into the durable VLM-region queue."""
+        now = time.time()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.executemany(
+                """INSERT INTO regions(job_id, page_number, region_number, label, bbox, crop_path)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    (
+                        task["job_id"],
+                        task["page_number"],
+                        index,
+                        region["label"],
+                        json.dumps(region["bbox"], separators=(",", ":")),
+                        region["crop_path"],
+                    )
+                    for index, region in enumerate(regions, start=1)
+                ),
+            )
+            db.execute(
+                """UPDATE pages SET status='recognizing', lease_owner=NULL, lease_expires=NULL,
+                   error=NULL WHERE job_id=? AND page_number=? AND status='running'""",
+                (task["job_id"], task["page_number"]),
+            )
+            self._sync(db, task["job_id"], now)
+
+    def claim_region(self, worker_id: str) -> dict[str, Any] | None:
+        now = time.time()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                """UPDATE regions SET status='pending', lease_owner=NULL, lease_expires=NULL,
+                   available_at=?, error='worker lease expired'
+                   WHERE status='running' AND lease_expires < ?""",
+                (now, now),
+            )
+            region = db.execute(
+                """SELECT r.job_id, r.page_number, r.region_number, r.attempts, r.label,
+                          r.bbox, r.crop_path
+                   FROM regions r JOIN jobs j ON j.id=r.job_id
+                   WHERE r.status='pending' AND r.available_at <= ?
+                     AND j.cancellation_requested=0
+                   ORDER BY COALESCE(j.last_claimed_at, 0), j.created_at,
+                            r.page_number, r.region_number LIMIT 1""",
+                (now,),
+            ).fetchone()
+            if not region:
+                return None
+            expires = now + self.settings.lease_seconds
+            db.execute(
+                """UPDATE regions SET status='running', attempts=attempts+1,
+                   lease_owner=?, lease_expires=?
+                   WHERE job_id=? AND page_number=? AND region_number=? AND status='pending'""",
+                (worker_id, expires, region["job_id"], region["page_number"], region["region_number"]),
+            )
+            db.execute(
+                "UPDATE jobs SET last_claimed_at=?, updated_at=? WHERE id=?",
+                (now, now, region["job_id"]),
+            )
+            return {**dict(region), "attempts": region["attempts"] + 1, "lease_expires": expires}
+
+    def finish_region(self, task: dict[str, Any], result_path: Path) -> bool:
+        """Return true when this was the last recognition result for a page."""
+        now = time.time()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                """UPDATE regions SET status='completed', result_path=?, error=NULL,
+                   lease_owner=NULL, lease_expires=NULL
+                   WHERE job_id=? AND page_number=? AND region_number=? AND status='running'""",
+                (str(result_path), task["job_id"], task["page_number"], task["region_number"]),
+            )
+            remaining = db.execute(
+                """SELECT count(*) FROM regions WHERE job_id=? AND page_number=?
+                   AND status != 'completed'""",
+                (task["job_id"], task["page_number"]),
+            ).fetchone()[0]
+            if remaining:
+                return False
+            return True
+
+    def claim_page_merge(
+        self, worker_id: str, job_id: str | None = None, page_number: int | None = None
+    ) -> dict[str, Any] | None:
+        now = time.time()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                """UPDATE pages SET status='recognizing', lease_owner=NULL, lease_expires=NULL
+                   WHERE status='merging' AND lease_expires < ?""",
+                (now,),
+            )
+            where = "p.status='recognizing' AND j.cancellation_requested=0"
+            args: list[Any] = []
+            if job_id is not None:
+                where += " AND p.job_id=?"
+                args.append(job_id)
+            if page_number is not None:
+                where += " AND p.page_number=?"
+                args.append(page_number)
+            page = db.execute(
+                f"""SELECT p.job_id, p.page_number FROM pages p JOIN jobs j ON j.id=p.job_id
+                    WHERE {where} AND NOT EXISTS (
+                        SELECT 1 FROM regions r WHERE r.job_id=p.job_id
+                        AND r.page_number=p.page_number AND r.status != 'completed'
+                    ) ORDER BY j.created_at, p.page_number LIMIT 1""",
+                args,
+            ).fetchone()
+            if not page:
+                return None
+            changed = db.execute(
+                """UPDATE pages SET status='merging', lease_owner=?, lease_expires=?
+                   WHERE job_id=? AND page_number=? AND status='recognizing'""",
+                (worker_id, now + self.settings.lease_seconds, page["job_id"], page["page_number"]),
+            ).rowcount
+            return dict(page) if changed else None
+
+    def region_results(self, job_id: str, page_number: int) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT label, bbox, result_path FROM regions
+                   WHERE job_id=? AND page_number=? AND status='completed'
+                   ORDER BY region_number""",
+                (job_id, page_number),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def complete_region_page(self, task: dict[str, Any], result_path: Path) -> dict[str, Any]:
+        now = time.time()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                """UPDATE pages SET status='completed', result_path=?, lease_owner=NULL,
+                   lease_expires=NULL WHERE job_id=? AND page_number=? AND status='merging'""",
+                (str(result_path), task["job_id"], task["page_number"]),
+            )
+            self._sync(db, task["job_id"], now)
+        return self.get(task["job_id"])  # type: ignore[return-value]
+
+    def fail_region(self, task: dict[str, Any], error_message: str, transient: bool) -> None:
+        now = time.time()
+        retry = transient and task["attempts"] <= self.settings.max_retries
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                """UPDATE regions SET status=?, available_at=?, error=?, lease_owner=NULL,
+                   lease_expires=NULL WHERE job_id=? AND page_number=? AND region_number=?
+                   AND status='running'""",
+                (
+                    "pending" if retry else "failed",
+                    now + min(30, 2 ** max(0, task["attempts"] - 1)) if retry else now,
+                    error_message[:2000], task["job_id"], task["page_number"], task["region_number"],
+                ),
+            )
+            if not retry:
+                db.execute(
+                    """UPDATE pages SET status='failed', error=?, lease_owner=NULL, lease_expires=NULL
+                       WHERE job_id=? AND page_number=?""",
+                    (error_message[:2000], task["job_id"], task["page_number"]),
+                )
+            db.execute(
+                "UPDATE jobs SET retry_count=retry_count+?, error_summary=?, updated_at=? WHERE id=?",
+                (int(retry), error_message[:2000], now, task["job_id"]),
+            )
+            self._sync(db, task["job_id"], now)
 
     def fail_page(self, task: dict[str, Any], error_message: str, transient: bool) -> None:
         now = time.time()
@@ -315,7 +508,7 @@ class JobStore:
             "SELECT cancellation_requested FROM jobs WHERE id=?", (job_id,)
         ).fetchone()
         pending = counts.get("pending", 0)
-        running = counts.get("running", 0)
+        running = counts.get("running", 0) + counts.get("recognizing", 0) + counts.get("merging", 0)
         completed = counts.get("completed", 0)
         failed = counts.get("failed", 0)
         if not pending and not running:

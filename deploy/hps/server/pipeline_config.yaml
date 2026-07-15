@@ -63,7 +63,7 @@ SubModules:
     genai_config:
       backend: vllm-server
       server_url: http://paddleocr-vlm-server:8118/v1
-      max_concurrency: 2
+      max_concurrency: 12
 
 SubPipelines:
   DocPreprocessor:

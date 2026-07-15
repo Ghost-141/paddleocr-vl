@@ -44,10 +44,10 @@ services:
       retries: 10
 
   triton:
-    image: ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlex/hps:paddlex3.7-${LAYOUT_DEVICE:-cpu}
+    image: ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlex/hps:paddlex3.7-cpu
     working_dir: /app
     environment:
-      PADDLEX_HPS_DEVICE_TYPE: ${LAYOUT_DEVICE:-cpu}
+      PADDLEX_HPS_DEVICE_TYPE: cpu
       PADDLEX_HPS_USE_HPIP: ${PADDLEX_HPS_USE_HPIP:-0}
     volumes:
       - ./deploy/hps/server:/app:ro
@@ -55,13 +55,6 @@ services:
     command: ["/bin/bash", "server.sh"]
     shm_size: 8gb
     restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["${GPU_DEVICE_ID:-0}"]
-              capabilities: [gpu]
     depends_on:
       model-setup:
         condition: service_completed_successfully
@@ -78,6 +71,36 @@ services:
       timeout: 5s
       retries: 10
 
+  layout:
+    image: ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlex/hps:paddlex3.7-${LAYOUT_DEVICE:-cpu}
+    environment:
+      LAYOUT_MODEL_DIR: /models/PP-DocLayoutV3
+      LAYOUT_MODEL_DEVICE: ${LAYOUT_DEVICE:-cpu}
+      OMP_NUM_THREADS: ${LAYOUT_THREADS:-4}
+    volumes:
+      - ./deploy/layout_server.py:/app/layout_server.py:ro
+      - models:/models:ro
+      - app-data:/data:ro
+    command: ["python3", "/app/layout_server.py"]
+    restart: unless-stopped
+    depends_on:
+      model-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090', timeout=4).close()"]
+      start_period: 5m
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    deploy:
+      replicas: ${LAYOUT_REPLICAS:-6}
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_DEVICE_ID:-0}"]
+              capabilities: [gpu]
+
   api:
     build: .
     ports:
@@ -85,10 +108,13 @@ services:
     environment: &app-environment
       PUBLIC_API_KEY: ${PUBLIC_API_KEY:?Set PUBLIC_API_KEY in .env}
       TRITON_URL: http://triton:8000
+      LAYOUT_URL: http://layout:8090
       DATA_DIR: /data
       MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-100}
       MAX_PAGES: ${MAX_PAGES:-100}
       MAX_JOBS: ${MAX_JOBS:-20}
+      MAX_PAGES_PER_JOB: ${MAX_PAGES_PER_JOB:-12}
+      MAX_REGIONS_PER_PAGE: ${MAX_REGIONS_PER_PAGE:-64}
       LEASE_SECONDS: ${LEASE_SECONDS:-900}
       MAX_RETRIES: ${MAX_RETRIES:-3}
       RETENTION_HOURS: ${RETENTION_HOURS:-24}
@@ -104,9 +130,22 @@ services:
       timeout: 5s
       retries: 10
 
-  worker:
+  layout-worker:
     build: .
-    command: ["python", "-m", "paddlocr_vl.worker"]
+    command: ["python", "-m", "paddlocr_vl.layout_worker"]
+    environment: *app-environment
+    volumes:
+      - app-data:/data
+    restart: unless-stopped
+    depends_on:
+      layout:
+        condition: service_healthy
+    deploy:
+      replicas: ${LAYOUT_WORKER_REPLICAS:-6}
+
+  vlm-worker:
+    build: .
+    command: ["python", "-m", "paddlocr_vl.vlm_worker"]
     environment: *app-environment
     volumes:
       - app-data:/data
@@ -115,7 +154,7 @@ services:
       triton:
         condition: service_healthy
     deploy:
-      replicas: 4
+      replicas: ${VLM_WORKER_REPLICAS:-48}
 
 volumes:
   app-data:
