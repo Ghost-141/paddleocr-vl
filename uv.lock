@@ -213,6 +213,7 @@ version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "pillow" },
     { name = "pypdfium2" },
     { name = "python-dotenv" },
@@ -222,13 +223,13 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "pytest" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115.0,<1" },
+    { name = "httpx", specifier = ">=0.28.1,<1" },
     { name = "pillow", specifier = ">=11,<12" },
     { name = "pypdfium2", specifier = ">=4.30,<5" },
     { name = "python-dotenv", specifier = ">=1.0.1,<2" },
@@ -237,10 +238,7 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [
-    { name = "httpx", specifier = ">=0.28.1,<1" },
-    { name = "pytest", specifier = ">=8.3.5,<9" },
-]
+dev = [{ name = "pytest", specifier = ">=8.3.5,<9" }]
 
 [[package]]
 name = "pillow"

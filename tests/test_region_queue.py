@@ -29,3 +29,28 @@ def test_region_queue_finishes_a_page_only_after_its_regions(settings_factory, t
     page_result.write_text('{"parsing_res_list": []}')
     completed = store.complete_region_page(merge, page_result)
     assert completed["status"] == "completed"
+
+
+def test_claim_regions_leases_a_batch(settings_factory, tmp_path: Path) -> None:
+    store = JobStore(settings_factory())
+    upload = tmp_path / "batch.pdf"
+    upload.write_bytes(b"pdf")
+    store.create_job(
+        owner_id="owner", filename="batch.pdf", output_format="both", total_pages=1, upload_path=upload
+    )
+    page = store.claim("layout")
+    assert page
+    store.enqueue_regions(
+        page,
+        [
+            {"label": "text", "bbox": [0, 0, 1, 1], "crop_path": str(tmp_path / f"{number}.jpg")}
+            for number in range(3)
+        ],
+    )
+
+    claimed = store.claim_regions("dispatcher", 2)
+
+    assert len(claimed) == 2
+    assert len({task["region_number"] for task in claimed}) == 2
+    with store.connect() as db:
+        assert db.execute("SELECT count(*) FROM regions WHERE status='running'").fetchone()[0] == 2

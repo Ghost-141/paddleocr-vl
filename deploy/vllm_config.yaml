@@ -1,7 +1,6 @@
-# Leave GPU headroom for the host; the layout pipeline runs in Triton on CPU.
-gpu-memory-utilization: 0.40
+# GPU layout shares this device; leave it enough VRAM to run safely.
+gpu-memory-utilization: 0.50
 max-model-len: 8192
-max-num-seqs: 2
-max-num-batched-tokens: 8192
-enforce-eager: true
+max-num-seqs: 128
+max-num-batched-tokens: 49152
 mm-processor-cache-gb: 0

@@ -1,4 +1,4 @@
-"""Minimal PP-DocLayoutV3 HTTP producer; runs inside the official CPU PaddleX image."""
+"""Minimal GPU PP-DocLayoutV3 HTTP service."""
 from __future__ import annotations
 
 import json
@@ -12,7 +12,7 @@ from paddlex import create_model
 MODEL = create_model(
     model_name="PP-DocLayoutV3",
     model_dir=os.getenv("LAYOUT_MODEL_DIR", "/models/PP-DocLayoutV3"),
-    device=os.getenv("LAYOUT_MODEL_DEVICE", "cpu"),
+    device="gpu",
 )
 
 

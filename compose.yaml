@@ -44,11 +44,10 @@ services:
       retries: 10
 
   layout:
-    image: ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlex/hps:paddlex3.7-${LAYOUT_DEVICE:-cpu}
+    image: ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlex/hps:paddlex3.7-gpu
     environment:
       LAYOUT_MODEL_DIR: /models/PP-DocLayoutV3
-      LAYOUT_MODEL_DEVICE: ${LAYOUT_DEVICE:-cpu}
-      OMP_NUM_THREADS: ${LAYOUT_THREADS:-4}
+      LAYOUT_MODEL_DEVICE: gpu
     volumes:
       - ./deploy/layout_server.py:/app/layout_server.py:ro
       - models:/models:ro
@@ -65,7 +64,7 @@ services:
       timeout: 5s
       retries: 10
     deploy:
-      replicas: ${LAYOUT_REPLICAS:-6}
+      replicas: 1
       resources:
         reservations:
           devices:
@@ -88,6 +87,8 @@ services:
       MAX_JOBS: ${MAX_JOBS:-20}
       MAX_PAGES_PER_JOB: ${MAX_PAGES_PER_JOB:-12}
       MAX_REGIONS_PER_PAGE: ${MAX_REGIONS_PER_PAGE:-64}
+      VLM_DISPATCH_CONCURRENCY: ${VLM_DISPATCH_CONCURRENCY:-32}
+      VLM_CLAIM_BATCH_SIZE: ${VLM_CLAIM_BATCH_SIZE:-32}
       LEASE_SECONDS: ${LEASE_SECONDS:-900}
       MAX_RETRIES: ${MAX_RETRIES:-3}
       RETENTION_HOURS: ${RETENTION_HOURS:-24}
@@ -127,7 +128,7 @@ services:
       paddleocr-vlm-server:
         condition: service_healthy
     deploy:
-      replicas: ${VLM_WORKER_REPLICAS:-48}
+      replicas: ${VLM_WORKER_REPLICAS:-4}
 
 volumes:
   app-data:

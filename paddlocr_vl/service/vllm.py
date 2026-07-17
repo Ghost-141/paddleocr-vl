@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from pathlib import Path
 import socket
 from typing import Any
 from urllib import error, request
+
+import httpx
 
 from ..core.config import Settings
 
@@ -24,23 +27,7 @@ class VllmClient:
         self.model = settings.vllm_model
 
     def infer(self, image_path: Path, *, label: str = "document", timeout: int = 600) -> dict[str, Any]:
-        encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
-        payload = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}},
-                        {
-                            "type": "text",
-                            "text": f"Extract the {label} content. Return only the result in Markdown, with no explanation.",
-                        },
-                    ],
-                }
-            ],
-            "temperature": 0,
-        }
+        payload = self._payload(image_path, label)
         try:
             with request.urlopen(
                 request.Request(
@@ -58,6 +45,47 @@ class VllmClient:
             ) from exc
         except (error.URLError, TimeoutError, socket.timeout, OSError) as exc:
             raise VllmError(f"vLLM request failed: {exc}") from exc
+        return self._result(raw, label)
+
+    async def infer_async(
+        self, client: httpx.AsyncClient, image_path: Path, *, label: str = "document"
+    ) -> dict[str, Any]:
+        payload = await asyncio.to_thread(self._payload, image_path, label)
+        try:
+            response = await client.post(self.url, json=payload)
+            response.raise_for_status()
+            raw = response.json()
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text[:1000]
+            raise VllmError(
+                f"vLLM returned HTTP {exc.response.status_code}: {detail}",
+                transient=exc.response.status_code >= 500 or exc.response.status_code == 429,
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise VllmError(f"vLLM request failed: {exc}") from exc
+        return self._result(raw, label)
+
+    def _payload(self, image_path: Path, label: str) -> dict[str, Any]:
+        encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+        return {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}},
+                        {
+                            "type": "text",
+                            "text": f"Extract the {label} content. Return only the result in Markdown, with no explanation.",
+                        },
+                    ],
+                }
+            ],
+            "temperature": 0,
+        }
+
+    @staticmethod
+    def _result(raw: dict[str, Any], label: str) -> dict[str, Any]:
         try:
             content = raw["choices"][0]["message"]["content"]
             if not isinstance(content, str):

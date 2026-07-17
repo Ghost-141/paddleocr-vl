@@ -19,6 +19,8 @@ class Settings:
     max_jobs: int = 20
     max_pages_per_job: int = 3
     max_regions_per_page: int = 64
+    vlm_dispatch_concurrency: int = 32
+    vlm_claim_batch_size: int = 32
     lease_seconds: int = 900
     max_retries: int = 3
     retention_hours: int = 24
@@ -56,6 +58,8 @@ def load_settings() -> Settings:
         max_jobs=int(os.getenv("MAX_JOBS", "20")),
         max_pages_per_job=int(os.getenv("MAX_PAGES_PER_JOB", "3")),
         max_regions_per_page=int(os.getenv("MAX_REGIONS_PER_PAGE", "64")),
+        vlm_dispatch_concurrency=int(os.getenv("VLM_DISPATCH_CONCURRENCY", "32")),
+        vlm_claim_batch_size=int(os.getenv("VLM_CLAIM_BATCH_SIZE", "32")),
         lease_seconds=int(os.getenv("LEASE_SECONDS", "900")),
         max_retries=int(os.getenv("MAX_RETRIES", "3")),
         retention_hours=int(os.getenv("RETENTION_HOURS", "24")),
@@ -66,6 +70,8 @@ def load_settings() -> Settings:
         "max_jobs",
         "max_pages_per_job",
         "max_regions_per_page",
+        "vlm_dispatch_concurrency",
+        "vlm_claim_batch_size",
         "lease_seconds",
     ):
         if getattr(settings, name) < 1:

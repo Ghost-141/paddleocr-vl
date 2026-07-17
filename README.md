@@ -1,7 +1,7 @@
 # Async PaddleOCR-VL API
 
 Authenticated document parsing for one NVIDIA GPU. FastAPI accepts work, SQLite
-stores durable page tasks, a fixed CPU layout pool produces cropped document
+stores durable page tasks, a fixed GPU layout service produces cropped document
 regions, and a separate fixed VLM pool keeps vLLM supplied from that queue.
 
 Only FastAPI is published, on `APP_PORT` (8080 by default). PaddleOCR and
@@ -10,8 +10,7 @@ PaddlePaddle are not installed in the API/worker image.
 ## Run
 
 Requirements: Docker Compose v2, NVIDIA Container Toolkit, and one supported
-NVIDIA GPU. The CPU layout pool needs host RAM for one PP-DocLayoutV3 model per
-`LAYOUT_REPLICAS` instance.
+NVIDIA GPU with room for both PP-DocLayoutV3 and PaddleOCR-VL.
 
 ```bash
 cp .env.example .env
@@ -19,20 +18,11 @@ openssl rand -hex 32  # put this value in PUBLIC_API_KEY
 docker compose up --build
 ```
 
-`layout` runs the official PaddleX `PP-DocLayoutV3` model on the device selected
-by `LAYOUT_DEVICE`. VLM workers send the cropped regions directly to the shared
-vLLM server; no Triton/HPS container is started.
-
-```env
-LAYOUT_DEVICE=cpu
-```
+`layout` runs one GPU-backed PaddleX `PP-DocLayoutV3` model. VLM workers send
+cropped regions directly to the shared vLLM server.
 
 The one-shot `model-setup` service only downloads the pinned PP-DocLayoutV3
 model. The direct VLM client uses vLLM's OpenAI-compatible endpoint.
-
-This is a validation deployment: region output is returned as one Markdown
-block per layout crop. Compare representative PDFs with the previous HPS path
-before treating it as a production-quality replacement.
 
 ## Hardware tuning
 
@@ -40,46 +30,30 @@ Start with the profile closest to the deployment host, then change one value at
 a time and compare pages/second, p95 job latency, layout memory, vLLM waiting
 requests, and GPU memory. These are starting points, not capacity guarantees.
 
-| Host | Layout replicas | Layout workers | VLM workers |
+| Host | Layout service | Layout workers | VLM workers |
 |---|---|---:|---:|
-| 16 CPU cores, 32 GB RAM, one 24 GB GPU, CPU layout | 4 | 4 | 8 |
-| 32+ CPU cores, 64+ GB RAM, one 24 GB GPU, CPU layout | 6 | 6 | 48 |
-| One 24 GB GPU, GPU layout | 1 | 2 | 32 |
+| One 24 GB GPU | 1 GPU process | 2 | 4 × 32 |
 
 The main controls are in different files:
 
 | Control | File | Effect |
 |---|---|---|
-| Layout producers | `.env`: `LAYOUT_REPLICAS` | Fixed PP-DocLayoutV3 model processes |
-| Threads per layout process | `.env`: `LAYOUT_THREADS` | Caps CPU thread oversubscription across layout replicas |
 | Layout workers | `.env`: `LAYOUT_WORKER_REPLICAS` | Render pages and feed the layout pool |
-| VLM workers | `.env`: `VLM_WORKER_REPLICAS` | Region consumers feeding vLLM |
+| VLM dispatchers | `.env`: `VLM_WORKER_REPLICAS` | Long-lived region consumers feeding vLLM |
+| Requests per dispatcher | `.env`: `VLM_DISPATCH_CONCURRENCY` | Bounded concurrent, keep-alive vLLM requests |
+| Lease batch size | `.env`: `VLM_CLAIM_BATCH_SIZE` | Regions leased per SQLite write transaction |
 | Per-document page depth | `.env`: `MAX_PAGES_PER_JOB` | Bounded number of in-flight pages from one PDF; preserves a durable, fair producer queue |
 | Per-page region bound | `.env`: `MAX_REGIONS_PER_PAGE` | Protects disk, queue depth, and latency on dense pages |
 
-For CPU layout on the 32-core host, start with six layout processes, six layout workers, and
-48 VLM workers. vLLM batches their recognition calls directly. `MAX_PAGES_PER_JOB=12` gives the region
-queue enough look-ahead to supply those consumers; `MAX_REGIONS_PER_PAGE=64`
-protects disk and latency on dense pages.
-
-For GPU layout, set `LAYOUT_DEVICE=gpu`, keep exactly one layout replica, and
-start with two layout workers and 32 VLM workers. The layout model and vLLM
-share the GPU, so use vLLM memory headroom before raising VLM concurrency.
+Keep one layout service, start with two layout workers plus four VLM dispatchers
+at 32 requests each. The layout model and vLLM share the GPU, so use vLLM
+memory headroom before raising dispatcher concurrency.
 
 ### Tune GPU layout production
 
-GPU layout is the fixed deployment mode. Keep these values fixed:
-
-```env
-LAYOUT_DEVICE=gpu
-LAYOUT_REPLICAS=1
-LAYOUT_THREADS=1
-```
-
-One layout replica avoids loading a second copy of PP-DocLayoutV3 onto the same
-GPU as vLLM. `LAYOUT_THREADS` does not increase GPU inference throughput.
-`LAYOUT_WORKER_REPLICAS` is the only layout setting to tune; it controls how
-many pages can render and wait to call that one layout service.
+GPU layout is fixed at one service to avoid loading another PP-DocLayoutV3
+copy onto the GPU. `LAYOUT_WORKER_REPLICAS` is the only layout setting to tune;
+it controls how many pages can render and wait to call that service.
 
 | Load-test observation | `LAYOUT_WORKER_REPLICAS` action |
 |---|---|
@@ -275,24 +249,12 @@ docker compose config
 docker compose port api 8080
 ```
 
-Check public and internal readiness without requiring `curl` in the Triton
-container:
+Check API and internal service readiness:
 
 ```bash
 curl --fail-with-body http://localhost:${APP_PORT:-8080}/health
-docker compose exec triton python3 -c \
-  "import urllib.request; urllib.request.urlopen('http://localhost:8000/v2/health/ready', timeout=5).close(); print('ready')"
 docker compose exec api python -c \
-  "import urllib.request; urllib.request.urlopen('http://triton:8000/v2/health/ready', timeout=5).close(); print('ready')"
-```
-
-Inspect the HPS configuration actually generated at container startup:
-
-```bash
-docker compose exec triton grep -n -A5 instance_group \
-  /paddlex/var/paddlex_model_repo/layout-parsing/config.pbtxt
-docker compose exec triton grep -n -E \
-  'model_dir:|server_url:|max_concurrency:' /app/pipeline_config.yaml
+  "import urllib.request; urllib.request.urlopen('http://layout:8090', timeout=5).close(); print('ready')"
 ```
 
 Monitor resource pressure during a load test:
@@ -310,7 +272,6 @@ than the final dependency failure:
 docker compose ps --all
 docker compose logs --tail=300 model-setup
 docker compose logs --tail=300 paddleocr-vlm-server
-docker compose logs --tail=300 triton
 docker compose logs --tail=300 api layout layout-worker vlm-worker
 ```
 
@@ -318,8 +279,8 @@ For an interactive restart that keeps the failing service attached to the
 terminal:
 
 ```bash
-docker compose stop triton
-docker compose up triton
+docker compose stop layout
+docker compose up layout
 ```
 
 Common failure checks:
@@ -327,12 +288,10 @@ Common failure checks:
 | Symptom | First check |
 |---|---|
 | `dependency ... is unhealthy` | Read the dependency's earlier logs; the dependency message is usually only the final symptom |
-| Triton says `failed to load all models` | Search earlier Triton logs for the first `ERROR`, invalid `config.pbtxt`, model mismatch, or conversion failure |
 | API is healthy but unreachable remotely | Run `docker compose port api 8080`, use the host IP and published port, then check the host firewall |
-| API cannot reach Triton | Run the internal readiness command above from the API container |
+| API cannot reach layout | Run the internal readiness command above from the API container |
 | Model setup repeatedly downloads | Check the `models` volume, `HF_TOKEN`, free disk space, and `model-setup` logs |
 | Image pull or Python package download times out | Check host DNS, proxy, registry/PyPI access, and retry; host networking does not fix a missing package version |
-| A utility such as `curl` is missing in Triton | Use the Python readiness command above instead of installing debugging tools in the container |
 
 The queue accepts 20 active PDF jobs by default. Page leases recover work after
 worker crashes, transient backend failures receive three bounded retries, and

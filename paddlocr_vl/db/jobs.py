@@ -287,7 +287,15 @@ class JobStore:
             self._sync(db, task["job_id"], now)
 
     def claim_region(self, worker_id: str) -> dict[str, Any] | None:
+        claimed = self.claim_regions(worker_id, 1)
+        return claimed[0] if claimed else None
+
+    def claim_regions(self, worker_id: str, limit: int) -> list[dict[str, Any]]:
+        """Atomically lease up to ``limit`` regions for one VLM dispatcher."""
+        if limit < 1:
+            return []
         now = time.time()
+        claimed: list[dict[str, Any]] = []
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute(
@@ -296,30 +304,36 @@ class JobStore:
                    WHERE status='running' AND lease_expires < ?""",
                 (now, now),
             )
-            region = db.execute(
-                """SELECT r.job_id, r.page_number, r.region_number, r.attempts, r.label,
-                          r.bbox, r.crop_path
-                   FROM regions r JOIN jobs j ON j.id=r.job_id
-                   WHERE r.status='pending' AND r.available_at <= ?
-                     AND j.cancellation_requested=0
-                   ORDER BY COALESCE(j.last_claimed_at, 0), j.created_at,
-                            r.page_number, r.region_number LIMIT 1""",
-                (now,),
-            ).fetchone()
-            if not region:
-                return None
-            expires = now + self.settings.lease_seconds
-            db.execute(
-                """UPDATE regions SET status='running', attempts=attempts+1,
-                   lease_owner=?, lease_expires=?
-                   WHERE job_id=? AND page_number=? AND region_number=? AND status='pending'""",
-                (worker_id, expires, region["job_id"], region["page_number"], region["region_number"]),
-            )
-            db.execute(
-                "UPDATE jobs SET last_claimed_at=?, updated_at=? WHERE id=?",
-                (now, now, region["job_id"]),
-            )
-            return {**dict(region), "attempts": region["attempts"] + 1, "lease_expires": expires}
+            for _ in range(limit):
+                region = db.execute(
+                    """SELECT r.job_id, r.page_number, r.region_number, r.attempts, r.label,
+                              r.bbox, r.crop_path
+                       FROM regions r JOIN jobs j ON j.id=r.job_id
+                       WHERE r.status='pending' AND r.available_at <= ?
+                         AND j.cancellation_requested=0
+                       ORDER BY COALESCE(j.last_claimed_at, 0), j.created_at,
+                                r.page_number, r.region_number LIMIT 1""",
+                    (now,),
+                ).fetchone()
+                if not region:
+                    break
+                expires = now + self.settings.lease_seconds
+                changed = db.execute(
+                    """UPDATE regions SET status='running', attempts=attempts+1,
+                       lease_owner=?, lease_expires=?
+                       WHERE job_id=? AND page_number=? AND region_number=? AND status='pending'""",
+                    (worker_id, expires, region["job_id"], region["page_number"], region["region_number"]),
+                ).rowcount
+                if not changed:
+                    continue
+                db.execute(
+                    "UPDATE jobs SET last_claimed_at=?, updated_at=? WHERE id=?",
+                    (now, now, region["job_id"]),
+                )
+                claimed.append(
+                    {**dict(region), "attempts": region["attempts"] + 1, "lease_expires": expires}
+                )
+        return claimed
 
     def finish_region(self, task: dict[str, Any], result_path: Path) -> bool:
         """Return true when this was the last recognition result for a page."""

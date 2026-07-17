@@ -109,5 +109,5 @@ def run(settings: Settings) -> None:
 
 
 if __name__ == "__main__":
-    argparse.ArgumentParser(description="CPU layout producer").parse_args()
+    argparse.ArgumentParser(description="Layout producer").parse_args()
     run(load_settings())

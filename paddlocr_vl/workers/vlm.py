@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 from pathlib import Path
 import socket
-import time
 from typing import Any
+
+import httpx
 
 from ..core.config import Settings, load_settings
 from ..db.jobs import JobStore
@@ -14,16 +16,19 @@ from ..service import VllmClient, VllmError
 from ..utils.markdown_assembler import assemble_page_markdown
 
 
-def process_one(store: JobStore, client: VllmClient, worker_id: str) -> bool:
-    task = store.claim_region(worker_id)
-    if task is None:
-        return False
+async def process_one(
+    store: JobStore,
+    client: VllmClient,
+    http_client: httpx.AsyncClient,
+    task: dict[str, Any],
+    worker_id: str,
+) -> None:
     result_path = (
         store.settings.jobs_dir / task["job_id"] / "regions"
         / f"{task['page_number']:06d}-{task['region_number']:04d}.json"
     )
     try:
-        result = client.infer(Path(task["crop_path"]), label=task["label"])
+        result = await client.infer_async(http_client, Path(task["crop_path"]), label=task["label"])
         result_path.write_text(json.dumps(result, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         if store.finish_region(task, result_path):
             _merge_one(store, worker_id, task["job_id"], task["page_number"])
@@ -31,7 +36,6 @@ def process_one(store: JobStore, client: VllmClient, worker_id: str) -> bool:
         store.fail_region(task, str(exc), exc.transient)
     except Exception as exc:
         store.fail_region(task, str(exc), False)
-    return True
 
 
 def _merge_page(store: JobStore, task: dict[str, Any]) -> Path:
@@ -142,15 +146,32 @@ def _merge_one(
     return True
 
 
-def run(settings: Settings) -> None:
+async def run(settings: Settings) -> None:
     store = JobStore(settings)
     client = VllmClient(settings)
     worker_id = f"{socket.gethostname()}-{os.getpid()}"
-    while True:
-        if not process_one(store, client, worker_id) and not _merge_one(store, worker_id):
-            time.sleep(0.02)
+    concurrency = settings.vlm_dispatch_concurrency
+    limits = httpx.Limits(max_connections=concurrency, max_keepalive_connections=concurrency)
+    in_flight: set[asyncio.Task[None]] = set()
+    async with httpx.AsyncClient(limits=limits, timeout=httpx.Timeout(600)) as http_client:
+        while True:
+            capacity = concurrency - len(in_flight)
+            if capacity:
+                for task in store.claim_regions(worker_id, min(capacity, settings.vlm_claim_batch_size)):
+                    in_flight.add(
+                        asyncio.create_task(process_one(store, client, http_client, task, worker_id))
+                    )
+            if in_flight:
+                done, in_flight = await asyncio.wait(
+                    in_flight, timeout=0.02, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    task.result()
+                continue
+            if not _merge_one(store, worker_id):
+                await asyncio.sleep(0.02)
 
 
 if __name__ == "__main__":
     argparse.ArgumentParser(description="VLM region consumer").parse_args()
-    run(load_settings())
+    asyncio.run(run(load_settings()))

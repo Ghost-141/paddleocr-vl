@@ -184,13 +184,13 @@ image data before returning it.
 | `413` | File exceeds `MAX_FILE_SIZE_MB` |
 | `415` | Filename extension or media type is unsupported, or a PDF was submitted |
 | `422` | Multipart field `file` is missing |
-| `502` | Triton/vLLM inference failed or returned an invalid response |
+| `502` | vLLM inference failed or returned an invalid response |
 
 Example backend failure:
 
 ```json
 {
-  "detail": "Document parsing failed: Triton request failed: ..."
+  "detail": "Document parsing failed: vLLM request failed: ..."
 }
 ```
 
