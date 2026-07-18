@@ -91,7 +91,6 @@ services:
       VLM_CLAIM_BATCH_SIZE: ${VLM_CLAIM_BATCH_SIZE:-32}
       LEASE_SECONDS: ${LEASE_SECONDS:-900}
       MAX_RETRIES: ${MAX_RETRIES:-3}
-      RETENTION_HOURS: ${RETENTION_HOURS:-24}
     volumes:
       - app-data:/data
     restart: unless-stopped

@@ -16,8 +16,8 @@ Production contract for API version `2.0.0`.
 `status_url` and `result_urls` are relative paths. Resolve them against the same
 base URL used to submit the job.
 
-The API does not implement an idempotency key. Every successful PDF submission
-creates a new job, even when the file and request parameters are identical.
+The API does not implement an idempotency key. Every successful image or PDF
+submission creates a new job, even when the file and request parameters are identical.
 
 FastAPI also exposes generated API discovery documents:
 
@@ -57,7 +57,7 @@ WWW-Authenticate: Bearer
 | Method | Path | Authentication | Success | Purpose |
 |---|---|---|---:|---|
 | `GET` | `/health` | No | `200` | Gateway liveness |
-| `POST` | `/parse/image` | Bearer | `200` | Parse one image synchronously |
+| `POST` | `/parse/image` | Bearer | `202` | Validate and queue one image |
 | `POST` | `/parse/pdf` | Bearer | `202` | Validate and queue a PDF |
 | `GET` | `/jobs/{job_id}` | Bearer | `200` | Read job status and progress |
 | `GET` | `/jobs/{job_id}/result/{artifact}` | Bearer | `200` | Download a completed artifact |
@@ -99,20 +99,19 @@ curl --fail-with-body http://localhost:8080/health
 
 ## `POST /parse/image`
 
-Parses one image synchronously. The HTTP request remains open until vLLM
-returns the page result or the backend request fails.
-
-The server-side vLLM request timeout is 600 seconds. Clients and upstream
-proxies must allow enough time for synchronous image processing or use the
-asynchronous PDF workflow for multi-page documents.
+Streams an image to durable storage, creates a one-page job, and returns
+immediately with `202 Accepted`. The same layout, region, VLM, assembly,
+progress, cancellation, retry, and result flow used for PDFs processes the
+image in the background.
 
 ### Request
 
 Content type: `multipart/form-data`
 
-| Field | Location | Type | Required | Description |
-|---|---|---|---|---|
-| `file` | form body | binary | Yes | One PNG, JPEG, WebP, or TIFF image |
+| Parameter | Location | Type | Required | Default | Description |
+|---|---|---|---|---|---|
+| `file` | form body | binary | Yes | — | One PNG, JPEG, WebP, or TIFF image |
+| `output_format` | query | enum | No | `both` | Artifact selection: `json`, `markdown`, or `both` |
 
 Accepted filename extensions:
 
@@ -125,56 +124,28 @@ Accepted media types are `image/png`, `image/jpeg`, `image/jpg`, `image/webp`,
 extension. Maximum upload size is controlled by `MAX_FILE_SIZE_MB`.
 
 ```bash
-curl --fail-with-body -X POST http://localhost:8080/parse/image \
+curl --fail-with-body -X POST 'http://localhost:8080/parse/image?output_format=both' \
   -H "Authorization: Bearer $OCR_API_KEY" \
   -F file=@page.png
 ```
 
-### `200 OK`
-
-Content type: `application/json`
+### `202 Accepted`
 
 ```json
 {
-  "request_id": "2a60ce2be68a48f29545725fd5ef22db",
-  "filename": "page.png",
-  "content_type": "image/png",
-  "file_size_bytes": 184233,
-  "processed_pages": 1,
-  "pages": [
-    {
-      "page": 1,
-      "json": {
-        "parsing_res_list": [
-          {
-            "block_label": "text",
-            "block_content": "Parsed document text"
-          }
-        ]
-      },
-      "markdown": "Parsed document text"
-    }
-  ],
-  "combined_markdown": "Parsed document text"
+  "job_id": "2a60ce2be68a48f29545725fd5ef22db",
+  "status": "queued",
+  "status_url": "/jobs/2a60ce2be68a48f29545725fd5ef22db",
+  "result_urls": {
+    "json": "/jobs/2a60ce2be68a48f29545725fd5ef22db/result/json",
+    "markdown": "/jobs/2a60ce2be68a48f29545725fd5ef22db/result/markdown"
+  }
 }
 ```
 
-| Field | Type | Nullable | Description |
-|---|---|---:|---|
-| `request_id` | string | No | Unique 32-character request identifier |
-| `filename` | string | Yes | Multipart filename supplied by the client |
-| `content_type` | string | Yes | Multipart media type supplied by the client |
-| `file_size_bytes` | integer | No | Number of uploaded bytes |
-| `processed_pages` | integer | No | Always `1` for this endpoint |
-| `pages` | array | No | One page result |
-| `pages[].page` | integer | No | One-based page number; always `1` |
-| `pages[].json` | object | No | Compact PaddleOCR-VL structured page result |
-| `pages[].markdown` | string | No | Markdown assembled from the structured blocks |
-| `combined_markdown` | string | No | Same value as page-one Markdown |
-
-The contents of `pages[].json` are model-defined and may gain fields when the
-pinned PaddleOCR-VL SDK is upgraded. The API removes embedded images and Base64
-image data before returning it.
+The response shape and `result_urls` behavior are identical to `POST /parse/pdf`.
+Poll `status_url` and download requested artifacts when its status becomes
+`completed`. Image jobs always report `total_pages: 1`.
 
 ### Errors
 
@@ -184,15 +155,7 @@ image data before returning it.
 | `413` | File exceeds `MAX_FILE_SIZE_MB` |
 | `415` | Filename extension or media type is unsupported, or a PDF was submitted |
 | `422` | Multipart field `file` is missing |
-| `502` | vLLM inference failed or returned an invalid response |
-
-Example backend failure:
-
-```json
-{
-  "detail": "Document parsing failed: vLLM request failed: ..."
-}
-```
+| `429` | `MAX_JOBS` queued/running jobs already exist; includes `Retry-After: 60` |
 
 ---
 
@@ -287,7 +250,7 @@ Returns the current state and page-level progress counters for an owned job.
 
 | Parameter | Location | Type | Required | Description |
 |---|---|---|---|---|
-| `job_id` | path | string | Yes | ID returned by `POST /parse/pdf` |
+| `job_id` | path | string | Yes | ID returned by an image or PDF submission |
 
 ```bash
 curl --fail-with-body \
@@ -331,7 +294,7 @@ curl --fail-with-body \
 | `created_at` | number | No | Creation time as Unix seconds |
 | `updated_at` | number | No | Last state-change time as Unix seconds |
 | `completed_at` | number | Yes | Terminal completion time; otherwise `null` |
-| `total_pages` | integer | No | Validated PDF page count |
+| `total_pages` | integer | No | Validated PDF page count, or `1` for an image |
 | `pending_pages` | integer | No | Pages waiting to be claimed or retried |
 | `running_pages` | integer | No | Pages with active worker leases |
 | `completed_pages` | integer | No | Successfully parsed pages |
@@ -606,14 +569,13 @@ as a stable machine error code.
 | `413` | Upload is too large | Reduce file size or change server limit |
 | `415` | File extension/media type is unsupported | Correct the upload metadata/file type |
 | `422` | Request shape or query value is invalid | Correct the request |
-| `429` | PDF queue is full | Retry after the `Retry-After` delay |
+| `429` | Image/PDF job queue is full | Retry after the `Retry-After` delay |
 | `500` | Unexpected gateway failure | Retry with bounded backoff and investigate logs |
-| `502` | Synchronous backend inference failed | Retry with bounded backoff if appropriate |
 
-## End-to-end PDF client flow
+## End-to-end job client flow
 
 ```text
-POST /parse/pdf
+POST /parse/image or POST /parse/pdf
   → save job_id and relative URLs
   → GET status_url every 1-2 seconds
       → queued/running/assembling: continue polling
@@ -646,7 +608,7 @@ curl --fail-with-body \
 The API currently uses polling and does not expose webhooks or server-sent
 events.
 
-## Limits and retention
+## Limits
 
 | Setting | Default | Effect |
 |---|---:|---|
@@ -655,8 +617,7 @@ events.
 | `MAX_JOBS` | `20` | Maximum jobs in `queued` or `running` state |
 | `MAX_RETRIES` | `3` | Transient page-inference retries |
 | `LEASE_SECONDS` | `900` | Worker page lease duration before crash recovery |
-| `RETENTION_HOURS` | `24` | Terminal job and artifact retention |
 
-After retention cleanup, status and result requests return `404`. The SQLite
-database and artifacts use local Docker storage and are not shared across
-machines.
+Jobs and artifacts are retained until an operator deletes the Docker volume or
+removes them directly from `/data`. The SQLite database and artifacts use local
+Docker storage and are not shared across machines.

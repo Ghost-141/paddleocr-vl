@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
-import shutil
 import sqlite3
 import time
 from pathlib import Path
@@ -50,6 +49,7 @@ class JobStore:
                     owner_id TEXT NOT NULL,
                     filename TEXT NOT NULL,
                     output_format TEXT NOT NULL,
+                    source_type TEXT NOT NULL DEFAULT 'pdf',
                     status TEXT NOT NULL DEFAULT 'queued',
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
@@ -105,6 +105,11 @@ class JobStore:
                     ON regions(status, available_at, page_number, region_number);
                 """
             )
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
+            if "source_type" not in columns:
+                db.execute(
+                    "ALTER TABLE jobs ADD COLUMN source_type TEXT NOT NULL DEFAULT 'pdf'"
+                )
 
     def create_job(
         self,
@@ -114,6 +119,7 @@ class JobStore:
         output_format: str,
         total_pages: int,
         upload_path: Path,
+        source_type: str = "pdf",
     ) -> dict[str, Any]:
         now = time.time()
         job_id = uuid.uuid4().hex
@@ -128,14 +134,15 @@ class JobStore:
             (job_dir / "pages").mkdir(parents=True)
             db.execute(
                 """INSERT INTO jobs (
-                    id, owner_id, filename, output_format, created_at, updated_at,
+                    id, owner_id, filename, output_format, source_type, created_at, updated_at,
                     total_pages, pending_pages, upload_path, json_path, markdown_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job_id,
                     owner_id,
                     filename,
                     output_format,
+                    source_type,
                     now,
                     now,
                     total_pages,
@@ -214,7 +221,7 @@ class JobStore:
                 self._sync(db, job_id, now)
 
             page = db.execute(
-                """SELECT p.job_id, p.page_number, p.attempts, j.upload_path
+                """SELECT p.job_id, p.page_number, p.attempts, j.upload_path, j.source_type
                    FROM pages p JOIN jobs j ON j.id=p.job_id
                    WHERE p.status='pending' AND p.available_at <= ?
                      AND j.status IN ('queued','running')
@@ -248,6 +255,7 @@ class JobStore:
                 "attempts": page["attempts"] + 1,
                 "lease_owner": lease_owner,
                 "upload_path": page["upload_path"],
+                "source_type": page["source_type"],
                 "lease_expires": expires,
             }
 
@@ -587,21 +595,6 @@ class JobStore:
                    error_summary=? WHERE id=? AND status='assembling'""",
                 (now, now, error_message[:2000], job_id),
             )
-
-    def cleanup(self) -> int:
-        cutoff = time.time() - self.settings.retention_hours * 3600
-        with self.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            rows = db.execute(
-                "SELECT id, upload_path FROM jobs WHERE status IN ('completed','failed','cancelled') "
-                "AND completed_at < ?",
-                (cutoff,),
-            ).fetchall()
-            for row in rows:
-                Path(row["upload_path"]).unlink(missing_ok=True)
-                shutil.rmtree(self.settings.jobs_dir / row["id"], ignore_errors=True)
-                db.execute("DELETE FROM jobs WHERE id=?", (row["id"],))
-        return len(rows)
 
     def _sync(self, db: sqlite3.Connection, job_id: str, now: float) -> None:
         counts = {

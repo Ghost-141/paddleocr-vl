@@ -40,7 +40,7 @@ See the API reference for authentication, exact parameters, response formats, ex
 - An NVIDIA GPU, supported NVIDIA driver, and NVIDIA Container Toolkit.
 - Internet access for the first image and model download from Hugging Face 
 - A firewall or reverse proxy policy that exposes only `APP_PORT`; layout and vLLM stay on the internal Compose network.(`Optional`)
-- Currently it can handle **20** active pdf jobs by default and can be adjusted using the `MAX_JOBS` variable on `.env`.
+- It admits **20** active image/PDF jobs by default; adjust `MAX_JOBS` in `.env`.
 
 
 ### Verify GPU access
@@ -162,8 +162,10 @@ for artifact, url in status["result_urls"].items():
     Path(f"result.{suffix}").write_bytes(response.content)
 ```
 
-`POST /parse/pdf` returns `202 Accepted`; it queues work and does not contain
-the completed document. 
+`POST /parse/pdf` and `POST /parse/image` both return `202 Accepted`; they
+queue work and do not contain the completed document. Submit an image with the
+same client flow by changing the path to `/parse/image`, using an image file and
+media type, and keeping the same `output_format` parameter.
 
 See [docs/API.md](docs/API.md) for image parsing,
 cancellation, errors, and the full API contract.
@@ -177,7 +179,7 @@ The current config was tested on a 24 GB VRAM based NVIDIA GPU with 16GB ram and
 | Variable | Configure in | Controls in the current design |
 |---|---|---|
 | `GPU_DEVICE_ID` | `.env` | GPU assigned to both the fixed PaddleX layout service and vLLM. |
-| `MAX_JOBS` | `.env` | Global admission limit for active PDF jobs; excess submissions receive `429`. |
+| `MAX_JOBS` | `.env` | Global admission limit for active image/PDF jobs; excess submissions receive `429`. |
 | `MAX_PAGES_PER_JOB` | `.env` | Maximum pages from one PDF that may be in the page pipeline at once; preserves fairness between jobs. |
 | `MAX_REGIONS_PER_PAGE` | `.env` | Maximum layout crops generated from one page; bounds disk use and region-queue fan-out. |
 | `LAYOUT_WORKER_REPLICAS` | `.env` | Number of page render/layout producers. They feed the region queue but do not directly increase vLLM concurrency. |
@@ -410,7 +412,7 @@ for table in ("jobs", "pages", "regions"):
 done
 ```
 
-Interpret the result as follows: `jobs` shows client-visible PDF lifecycle,
+Interpret the result as follows: `jobs` shows client-visible document lifecycle,
 `pages` shows layout work, and `regions` shows the crop requests waiting for or
 running through vLLM. Compare `regions` with vLLM's `running` and `waiting`
 gauges: sustained vLLM waiting means the engine is saturated; pending regions

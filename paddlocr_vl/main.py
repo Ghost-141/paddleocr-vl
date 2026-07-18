@@ -6,7 +6,6 @@ from .api.router import api_router
 from .core.config import Settings, load_settings
 from .core.logger import configure_logging
 from .db.jobs import JobStore
-from .service import VllmClient
 
 configure_logging()
 
@@ -16,7 +15,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="PaddleOCR-VL Document Parser API", version="2.0.0")
     app.state.settings = config
     app.state.job_store = JobStore(config)
-    app.state.vllm_client = VllmClient(config)
     app.include_router(api_router)
     return app
 

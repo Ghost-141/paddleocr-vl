@@ -20,9 +20,12 @@ def process_one(store: JobStore, client: LayoutClient, worker_id: str) -> bool:
     if task is None:
         return False
     job_dir = store.settings.jobs_dir / task["job_id"]
-    rendered = job_dir / f".{worker_id}-{task['page_number']}.jpg"
+    source = Path(task["upload_path"])
+    is_image = task["source_type"] == "image"
+    rendered = source if is_image else job_dir / f".{worker_id}-{task['page_number']}.jpg"
     try:
-        render_page(Path(task["upload_path"]), task["page_number"], rendered)
+        if not is_image:
+            render_page(source, task["page_number"], rendered)
         regions = _crop_regions(
             rendered,
             client.detect(rendered),
@@ -36,7 +39,8 @@ def process_one(store: JobStore, client: LayoutClient, worker_id: str) -> bool:
     except Exception as exc:
         store.fail_page(task, str(exc), False)
     finally:
-        rendered.unlink(missing_ok=True)
+        if not is_image:
+            rendered.unlink(missing_ok=True)
     return True
 
 

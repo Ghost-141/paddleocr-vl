@@ -23,7 +23,6 @@ class Settings:
     vlm_claim_batch_size: int = 32
     lease_seconds: int = 900
     max_retries: int = 3
-    retention_hours: int = 24
 
     @property
     def max_file_size_bytes(self) -> int:
@@ -62,7 +61,6 @@ def load_settings() -> Settings:
         vlm_claim_batch_size=int(os.getenv("VLM_CLAIM_BATCH_SIZE", "32")),
         lease_seconds=int(os.getenv("LEASE_SECONDS", "900")),
         max_retries=int(os.getenv("MAX_RETRIES", "3")),
-        retention_hours=int(os.getenv("RETENTION_HOURS", "24")),
     )
     for name in (
         "max_file_size_mb",
@@ -76,6 +74,6 @@ def load_settings() -> Settings:
     ):
         if getattr(settings, name) < 1:
             raise RuntimeError(f"{name.upper()} must be at least 1")
-    if settings.max_retries < 0 or settings.retention_hours < 1:
-        raise RuntimeError("MAX_RETRIES must be non-negative and RETENTION_HOURS positive")
+    if settings.max_retries < 0:
+        raise RuntimeError("MAX_RETRIES must be non-negative")
     return settings

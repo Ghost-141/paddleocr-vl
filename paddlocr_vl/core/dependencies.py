@@ -9,7 +9,6 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import Settings
 from ..db.jobs import JobStore
-from ..service import VllmClient
 
 bearer_scheme = HTTPBearer(scheme_name="Bearer Authentication")
 
@@ -20,10 +19,6 @@ def get_settings(request: Request) -> Settings:
 
 def get_job_store(request: Request) -> JobStore:
     return request.app.state.job_store
-
-
-def get_vllm_client(request: Request) -> VllmClient:
-    return request.app.state.vllm_client
 
 
 def get_owner_id(request: Request) -> str:

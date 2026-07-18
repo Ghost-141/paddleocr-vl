@@ -6,59 +6,49 @@ import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse
 
 from ...core.config import Settings
-from ...core.dependencies import (
-    authorize,
-    get_job_store,
-    get_owner_id,
-    get_settings,
-    get_vllm_client,
-)
+from ...core.dependencies import authorize, get_job_store, get_owner_id, get_settings
 from ...db.jobs import JobStore, QueueFullError
 from ...utils.pdf_utils import EncryptedPDFError, InvalidPDFError, inspect_pdf
-from ...schemas import OutputFormat, ParseResponse
-from ...service import VllmClient, VllmError
-from ...utils.file_utils import json_compatible, save_upload, validate_image_upload, validate_upload
-from ...utils.markdown_assembler import assemble_page_markdown
+from ...schemas import OutputFormat
+from ...utils.file_utils import save_upload, validate_image_upload, validate_upload
 
 router = APIRouter(tags=["documents"], dependencies=[Depends(authorize)])
 
 
-@router.post(
-    "/parse/image", response_model=ParseResponse, response_model_exclude_none=True
-)
+@router.post("/parse/image", status_code=202)
 async def parse_image(
     file: Annotated[UploadFile, File(...)],
     settings: Annotated[Settings, Depends(get_settings)],
-    client: Annotated[VllmClient, Depends(get_vllm_client)],
-) -> Response:
+    store: Annotated[JobStore, Depends(get_job_store)],
+    owner_id: Annotated[str, Depends(get_owner_id)],
+    output_format: Annotated[
+        OutputFormat, Query(description="Artifact(s) to create")
+    ] = OutputFormat.BOTH,
+) -> JSONResponse:
     extension = validate_image_upload(file)
-    request_id = uuid.uuid4().hex
-    upload_path = settings.upload_dir / f"{request_id}{extension}"
+    upload_path = settings.upload_dir / f"{uuid.uuid4().hex}{extension}"
     try:
-        size = await save_upload(file, upload_path, settings.max_file_size_bytes)
+        await save_upload(file, upload_path, settings.max_file_size_bytes)
         try:
-            page = await run_in_threadpool(client.infer, upload_path)
-        except VllmError as exc:
-            raise HTTPException(502, f"Document parsing failed: {exc}") from exc
-        markdown = assemble_page_markdown(page)
-        return JSONResponse(
-            json_compatible(
-                {
-                    "request_id": request_id,
-                    "filename": file.filename,
-                    "content_type": file.content_type,
-                    "file_size_bytes": size,
-                    "processed_pages": 1,
-                    "pages": [{"page": 1, "json": page, "markdown": markdown}],
-                    "combined_markdown": markdown,
-                }
+            job = store.create_job(
+                owner_id=owner_id,
+                filename=file.filename or f"image{extension}",
+                output_format=output_format.value,
+                total_pages=1,
+                upload_path=upload_path,
+                source_type="image",
             )
-        )
-    finally:
+        except QueueFullError as exc:
+            raise HTTPException(
+                429, "Job queue is full", headers={"Retry-After": "60"}
+            ) from exc
+    except Exception:
         upload_path.unlink(missing_ok=True)
+        raise
+    return JSONResponse(_submission(job), status_code=202)
 
 
 @router.post("/parse/pdf", status_code=202)
