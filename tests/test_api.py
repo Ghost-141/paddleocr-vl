@@ -1,6 +1,5 @@
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -11,25 +10,10 @@ from paddlocr_vl.core.config import Settings
 from paddlocr_vl.db.jobs import JobStore
 
 
-class FakeVllmClient:
-    def __init__(self) -> None:
-        self.calls: list[Path] = []
-
-    def infer(self, path: Path, *, label: str = "document") -> dict[str, Any]:
-        self.calls.append(path)
-        assert path.is_file()
-        return {
-            "parsing_res_list": [
-                {"block_label": "text", "block_content": "Parsed text"}
-            ]
-        }
-
-
-def make_client(settings: Settings, vlm: FakeVllmClient | None = None) -> TestClient:
+def make_client(settings: Settings) -> TestClient:
     app = FastAPI()
     app.state.settings = settings
     app.state.job_store = JobStore(settings)
-    app.state.vllm_client = vlm or FakeVllmClient()
     app.include_router(api_router)
     return TestClient(app)
 
@@ -61,19 +45,26 @@ def test_protected_endpoints_require_bearer_token(
     assert response.status_code == 401
 
 
-def test_parse_image_calls_vllm_and_cleans_upload(
-    settings_factory: Callable[..., Settings], auth_headers: dict[str, str]
+@pytest.mark.parametrize("output_format", ["json", "markdown", "both"])
+def test_parse_image_creates_durable_job(
+    settings_factory: Callable[..., Settings],
+    auth_headers: dict[str, str],
+    output_format: str,
 ) -> None:
     settings = settings_factory()
-    vlm = FakeVllmClient()
-    response = make_client(settings, vlm).post(
-        "/parse/image",
+    response = make_client(settings).post(
+        f"/parse/image?output_format={output_format}",
         headers=auth_headers,
         files={"file": ("page.png", b"image-bytes", "image/png")},
     )
-    assert response.status_code == 200
-    assert response.json()["combined_markdown"] == "Parsed text"
-    assert not vlm.calls[0].exists()
+    assert response.status_code == 202
+    body = response.json()
+    assert set(body["result_urls"]) == (
+        {"json", "markdown"} if output_format == "both" else {output_format}
+    )
+    job = JobStore(settings).get(body["job_id"])
+    assert job and job["total_pages"] == 1 and job["source_type"] == "image"
+    assert Path(job["upload_path"]).is_file()
 
 
 @pytest.mark.parametrize("output_format", ["json", "markdown", "both"])
@@ -135,7 +126,6 @@ def test_completed_result_is_raw_file(
     app = FastAPI()
     app.state.settings = settings
     app.state.job_store = store
-    app.state.vllm_client = FakeVllmClient()
     app.include_router(api_router)
     response = TestClient(app).get(
         f"/jobs/{job['id']}/result/markdown", headers=auth_headers

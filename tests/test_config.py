@@ -14,7 +14,7 @@ def test_load_settings_defaults(monkeypatch, tmp_path: Path) -> None:
     assert settings.max_file_size_bytes == 100 * 1024 * 1024
     assert settings.max_pages == 100
     assert settings.max_jobs == 20
-    assert settings.max_pages_per_job == 12
+    assert settings.max_pages_per_job == 3
 
 
 def test_load_settings_reads_runtime_overrides(monkeypatch, tmp_path: Path) -> None:

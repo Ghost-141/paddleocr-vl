@@ -19,7 +19,6 @@ def settings_factory(tmp_path: Path) -> Callable[..., Settings]:
             "max_pages_per_job": 12,
             "lease_seconds": 900,
             "max_retries": 3,
-            "retention_hours": 24,
         }
         values.update(overrides)
         return Settings(**values)  # type: ignore[arg-type]

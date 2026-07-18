@@ -61,10 +61,10 @@ def test_expired_lease_is_reclaimed_and_transient_failure_retries(
     assert store.get(job["id"])["retry_count"] == 1  # type: ignore[index]
 
 
-def test_cancellation_stops_pending_pages_and_cleanup_removes_artifacts(
+def test_cancellation_stops_pending_pages(
     settings_factory: Callable[..., Settings], tmp_path: Path
 ) -> None:
-    store = JobStore(settings_factory(retention_hours=1))
+    store = JobStore(settings_factory())
     upload = tmp_path / "cancel.pdf"
     job = make_job(store, upload, "cancel.pdf", 2)
     running = store.claim("worker")
@@ -74,13 +74,8 @@ def test_cancellation_stops_pending_pages_and_cleanup_removes_artifacts(
     assert store.claim("other") is None
     store.finish_page(running, tmp_path / "page.json")  # type: ignore[arg-type]
     assert store.get(job["id"])["status"] == "cancelled"  # type: ignore[index]
-    with store.connect() as db:
-        db.execute(
-            "UPDATE jobs SET completed_at=? WHERE id=?", (time.time() - 7200, job["id"])
-        )
-    assert store.cleanup() == 1
-    assert not upload.exists()
-    assert store.get(job["id"]) is None
+    assert upload.exists()
+    assert store.get(job["id"]) is not None
 
 
 def test_cancelled_expired_lease_does_not_leave_job_stuck(
