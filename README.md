@@ -116,7 +116,7 @@ The `model-step` download and pins the `PP-DocLayoutV3` model for the first time
 Install the Python client dependency:
 
 ```bash
-python -m pip install requests
+python -m pip install requests python-dotenv
 ```
 
 Set `OCR_BASE_URL` to the deployed server and `OCR_API_KEY` to the configured
@@ -127,39 +127,62 @@ the JSON and Markdown artifacts.
 import os
 from pathlib import Path
 import time
-
+from dotenv import load_dotenv
 import requests
 
+load_dotenv()
 
-base_url = os.environ.get("OCR_BASE_URL", "http://localhost:8080").rstrip("/")
-headers = {"Authorization": f"Bearer {os.environ['OCR_API_KEY']}"}
+base_url = os.getenv("OCR_BASE_URL", "http://localhost:8080").rstrip("/")
+api_key = os.getenv("OCR_API_KEY")
 
-with Path("document.pdf").open("rb") as document:
+if not api_key:
+    raise ValueError("OCR_API_KEY not found in .env")
+
+headers = {"Authorization": f"Bearer {api_key}", "accept": "application/json"}
+
+input_file = Path("task.pdf")
+
+# Submit job (no read timeout limit)
+with input_file.open("rb") as document:
     response = requests.post(
         f"{base_url}/parse/pdf",
-        params={"output_format": "both"},
+        params={"output_format": "markdown"},
         headers=headers,
-        files={"file": ("document.pdf", document, "application/pdf")},
-        timeout=60,
+        files={"file": (input_file.name, document, "application/pdf")},
+        timeout=(10, None),  # 🔥 important fix
     )
+
 response.raise_for_status()
 job = response.json()
 
+print(f"Job submitted: {job['job_id']}")
+
+# Poll for completion
 while True:
-    response = requests.get(f"{base_url}{job['status_url']}", headers=headers, timeout=30)
+    response = requests.get(
+        f"{base_url}{job['status_url']}", headers=headers, timeout=30
+    )
     response.raise_for_status()
     status = response.json()
+
     if status["status"] == "completed":
         break
     if status["status"] in {"failed", "cancelled"}:
-        raise RuntimeError(status.get("error") or f"Job {status['status']}")
+        raise RuntimeError(status)
+
     time.sleep(2)
 
-for artifact, url in status["result_urls"].items():
-    response = requests.get(f"{base_url}{url}", headers=headers, timeout=60)
-    response.raise_for_status()
-    suffix = "json" if artifact == "json" else "md"
-    Path(f"result.{suffix}").write_bytes(response.content)
+# Download markdown result
+markdown_url = status["result_urls"]["markdown"]
+
+response = requests.get(f"{base_url}{markdown_url}", headers=headers, timeout=60)
+response.raise_for_status()
+
+# Save as .md with same name
+output_file = input_file.with_suffix(".md")
+output_file.write_text(response.text, encoding="utf-8")
+
+print(f"Saved Markdown to: {output_file}")
 ```
 
 `POST /parse/pdf` and `POST /parse/image` both return `202 Accepted`; they
